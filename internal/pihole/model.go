@@ -4,7 +4,7 @@ import "fmt"
 
 type BlockingStatus struct {
 	Blocking string  `json:"blocking"`
-	Timer    int     `json:"timer"`
+	Timer    float64 `json:"timer"`
 	Took     float64 `json:"took"`
 }
 
