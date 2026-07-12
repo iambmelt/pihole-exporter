@@ -1,0 +1,38 @@
+name: Sync upstream
+
+# Keeps this fork's master current with eko/pihole-exporter, and opens an issue
+# when a new upstream release lands so the homelab patch branch can be rebased.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fast-forward master from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/merge-upstream" -f branch=master
+
+      - name: Flag a new upstream release for rebase
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream=$(gh api repos/eko/pihole-exporter/releases/latest --jq .tag_name)
+          base=$(gh api "repos/${{ github.repository }}/tags" \
+            --jq 'map(.name) | map(select(contains("-homelab")))[0] // ""' | sed 's/-homelab.*//')
+          echo "upstream release: ${upstream:-none}; patch base: ${base:-none}"
+          [ -n "$upstream" ] && [ "$upstream" != "$base" ] || exit 0
+          title="Rebase homelab patches onto upstream $upstream"
+          if gh issue list --state open --search "$title in:title" --json title \
+               --jq '.[].title' | grep -qxF "$title"; then
+            echo "rebase issue already open"; exit 0
+          fi
+          gh issue create --title "$title" --body \
+            "Upstream published \`$upstream\` (patches are based on \`$base\`). Rebase the homelab branch onto \`$upstream\`, re-run \`go test ./...\`, and push a new \`${upstream}-homelab.N\` tag."
