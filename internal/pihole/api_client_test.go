@@ -1,7 +1,10 @@
 package pihole_test
 
 import (
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,5 +42,67 @@ func TestNewAPIClient_TLSVerification(t *testing.T) {
 				t.Errorf("InsecureSkipVerify = %v, want %v", got, tc.wantInsecureSkip)
 			}
 		})
+	}
+}
+
+// TestFetchData_ReauthAfterSessionRejected verifies that a session rejected
+// server-side (as happens when Pi-hole restarts) is dropped so the next request
+// re-authenticates, rather than resending the dead SID until the local validity
+// window expires.
+func TestFetchData_ReauthAfterSessionRejected(t *testing.T) {
+	var mu sync.Mutex
+	authCount := 0
+	validSID := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/auth" {
+			mu.Lock()
+			authCount++
+			validSID = fmt.Sprintf("sid-%d", authCount)
+			sid := validSID
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"session":{"valid":true,"sid":%q,"validity":1800}}`, sid)
+			return
+		}
+
+		mu.Lock()
+		accepted := r.Header.Get("X-FTL-SID") == validSID
+		mu.Unlock()
+		if !accepted {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	c := pihole.NewAPIClient(server.URL, "secret", 5*time.Second, false)
+	var out map[string]any
+
+	if err := c.FetchData("/api/stats/summary", &out); err != nil {
+		t.Fatalf("initial fetch: %v", err)
+	}
+
+	// Simulate a Pi-hole restart: the cached SID is no longer accepted.
+	mu.Lock()
+	validSID = "gone"
+	mu.Unlock()
+
+	// This request sends the stale SID and is rejected.
+	if err := c.FetchData("/api/stats/summary", &out); err == nil {
+		t.Fatal("expected an error when the session is rejected")
+	}
+
+	// The following request must re-authenticate and succeed.
+	if err := c.FetchData("/api/stats/summary", &out); err != nil {
+		t.Fatalf("fetch after re-authentication: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if authCount != 2 {
+		t.Fatalf("expected 2 authentications, got %d", authCount)
 	}
 }

@@ -152,6 +152,18 @@ func (c *APIClient) FetchData(endpoint string, result interface{}) error {
 		}
 	}()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// The session was rejected server-side. This happens whenever Pi-hole
+		// restarts, since FTL drops all sessions but our cached SID is still
+		// within its local validity window. Clear it so the next request
+		// re-authenticates instead of resending the dead SID indefinitely.
+		c.mu.Lock()
+		c.sessionID = ""
+		c.validity = time.Time{}
+		c.mu.Unlock()
+		return fmt.Errorf("session rejected, re-authenticating on next request")
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("non-200 status code: %d", resp.StatusCode)
 	}
