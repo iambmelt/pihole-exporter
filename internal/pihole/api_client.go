@@ -42,6 +42,17 @@ func NewAPIClient(baseURL string, password string, timeout time.Duration, skipTL
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: skipTLSVerification,
 		},
+		// Open a fresh connection for every request instead of pooling
+		// keep-alives. FTL closes idle API connections server-side between our
+		// scrapes, and a NATed path to Pi-hole can silently drop the mapping,
+		// leaving a pooled connection half-dead. When the drop is silent (no
+		// FIN/RST) the transport still believes the socket is usable, so a
+		// reused request blocks until the client timeout instead of failing
+		// fast — the exporter then serves metrics seconds late and trips the
+		// scrape and health-check timeouts. A new connection per request is
+		// cheap against a local Pi-hole; the session SID is reused regardless,
+		// since it travels in the request header rather than the connection.
+		DisableKeepAlives: true,
 	}
 
 	return &APIClient{
