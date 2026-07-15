@@ -2,6 +2,7 @@ package pihole_test
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -53,6 +54,54 @@ func TestNewAPIClient_DisablesKeepAlives(t *testing.T) {
 	c := pihole.NewAPIClient("https://cloudflare.com", "", time.Second, false)
 	if !transport(t, c).DisableKeepAlives {
 		t.Error("DisableKeepAlives = false, want true")
+	}
+}
+
+// TestFetchData_UsesFreshConnectionPerRequest verifies the behavior that
+// DisableKeepAlives is there for: sequential requests must not reuse a
+// connection. A pooled keep-alive connection would show up here as a single
+// server-side connection serving every request.
+func TestFetchData_UsesFreshConnectionPerRequest(t *testing.T) {
+	var mu sync.Mutex
+	newConns := 0
+	requests := 0
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		if r.URL.Path == "/api/auth" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"session":{"valid":true,"sid":"sid","validity":1800}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	// ConnState must be set before Start(): the serving goroutine reads it.
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			mu.Lock()
+			newConns++
+			mu.Unlock()
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	c := pihole.NewAPIClient(server.URL, "secret", 5*time.Second, false)
+	var out map[string]any
+	for i := 0; i < 3; i++ {
+		if err := c.FetchData("/api/stats/summary", &out); err != nil {
+			t.Fatalf("fetch %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// One auth plus three data requests, each on its own connection.
+	if newConns != requests {
+		t.Errorf("server saw %d new connections for %d requests; connections were reused", newConns, requests)
 	}
 }
 
