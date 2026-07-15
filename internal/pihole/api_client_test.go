@@ -45,6 +45,17 @@ func TestNewAPIClient_TLSVerification(t *testing.T) {
 	}
 }
 
+// TestNewAPIClient_DisablesKeepAlives verifies the client opens a fresh
+// connection per request. Pooling a keep-alive connection that FTL has closed
+// server-side between scrapes makes each request block until the client
+// timeout, so the exporter must not reuse connections.
+func TestNewAPIClient_DisablesKeepAlives(t *testing.T) {
+	c := pihole.NewAPIClient("https://cloudflare.com", "", time.Second, false)
+	if !transport(t, c).DisableKeepAlives {
+		t.Error("DisableKeepAlives = false, want true")
+	}
+}
+
 // TestFetchData_ReauthAfterSessionRejected verifies that a session rejected
 // server-side (as happens when Pi-hole restarts) is dropped so the next request
 // re-authenticates, rather than resending the dead SID until the local validity
