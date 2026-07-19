@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,59 +33,37 @@ func NewServer(addr string, port uint16, clients []*pihole.Client) *Server {
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
 		log.Debugf("request.Header: %+v\n", request.Header)
 
-		// Use a WaitGroup to track goroutines
+		// Each client's CollectMetricsAsync sends exactly one status on its own
+		// buffered (cap-1) Status channel. Run one collector goroutine per client
+		// and let the loop below be the single consumer, reading exactly one
+		// status per client.
 		var wg sync.WaitGroup
-		// Create a context with timeout for metrics collection
-		ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
-		defer cancel()
-
-		// Channel to collect results from goroutines
-		resultChan := make(chan *pihole.ClientChannel, len(clients))
-
 		for _, client := range clients {
 			wg.Add(1)
 			go func(c *pihole.Client) {
 				defer wg.Done()
-
-				// Create a channel for this goroutine
-				doneChan := make(chan struct{})
-
-				go func() {
-					c.CollectMetricsAsync(writer, request)
-					close(doneChan)
-				}()
-
-				// Wait for either completion or timeout
-				select {
-				case <-doneChan:
-					// Normal completion, status will be read below
-				case <-ctx.Done():
-					// Timeout occurred
-					resultChan <- &pihole.ClientChannel{
-						Status: pihole.MetricsCollectionTimeout,
-						Err:    fmt.Errorf("metrics collection from %s timed out", c.GetHostname()),
-					}
-					// We need to read from the Status channel to prevent blocking
-					go func() {
-						<-c.Status // Discard the result when it eventually comes
-					}()
-				}
+				c.CollectMetricsAsync(writer, request)
 			}(client)
 		}
 
-		// Start a goroutine to close resultChan when all goroutines are done
-		go func() {
-			wg.Wait()
-			close(resultChan)
-		}()
-
-		// Read all results
+		// This loop is the ONLY receiver of Status. The previous version wrapped
+		// collection in a 10s context and, on timeout, started a second goroutine
+		// that also received from the same channel to "prevent blocking". That
+		// left two receivers racing for the single value: when the discard
+		// goroutine won, this loop blocked forever, the handler never reached
+		// ServeHTTP, and no response was written — so every Prometheus scrape and
+		// the in-container /metrics health check hung until the container was
+		// restarted, with no log line because the collection itself had
+		// succeeded. Per-request latency is already bounded by the API client
+		// timeout applied to each upstream call, so no separate handler timeout
+		// is needed.
 		for _, client := range clients {
 			status := <-client.Status
 			if status.Status != pihole.MetricsCollectionSuccess {
 				log.Warnf("An error occurred while contacting %s: %+v\n", client.GetHostname(), status.Err)
 			}
 		}
+		wg.Wait()
 
 		promhttp.Handler().ServeHTTP(writer, request)
 	})
@@ -108,28 +85,6 @@ func (s *Server) Stop() {
 	defer cancel()
 
 	s.httpServer.Shutdown(ctx)
-}
-
-// handleMetrics, helper function is unused
-func (s *Server) handleMetrics(clients []*pihole.Client) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		errors := make([]string, 0)
-
-		for _, client := range clients {
-			if err := client.CollectMetrics(writer, request); err != nil {
-				errors = append(errors, err.Error())
-				log.Warnf("error collecting metrics from %s: %+v\n", client.GetHostname(), err)
-			}
-		}
-
-		if len(errors) == len(clients) {
-			writer.WriteHeader(http.StatusBadRequest)
-			body := strings.Join(errors, "\n")
-			_, _ = writer.Write([]byte(body))
-		}
-
-		promhttp.Handler().ServeHTTP(writer, request)
-	}
 }
 
 func (s *Server) readinessHandler() http.HandlerFunc {
