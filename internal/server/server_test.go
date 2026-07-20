@@ -119,3 +119,21 @@ func TestMetricsHandler_SlowCollectionStillServes(t *testing.T) {
 		t.Fatalf("response body does not contain a pihole_ series:\n%s", body)
 	}
 }
+
+// TestNewServer_ClosesIdleConnections verifies the HTTP server sets an
+// IdleTimeout below the 15s Prometheus scrape interval so idle keep-alive
+// connections close between scrapes. Left open, an idle connection over the
+// port-publishing NAT path goes stale and the next inbound scrape hangs until
+// its timeout (up==0) until the container is restarted. ReadHeaderTimeout is
+// asserted alongside as slowloris hardening.
+func TestNewServer_ClosesIdleConnections(t *testing.T) {
+	srv := NewServer("127.0.0.1", 0, nil)
+
+	const scrapeInterval = 15 * time.Second
+	if got := srv.httpServer.IdleTimeout; got <= 0 || got >= scrapeInterval {
+		t.Errorf("IdleTimeout = %v, want a positive value below the %v scrape interval", got, scrapeInterval)
+	}
+	if got := srv.httpServer.ReadHeaderTimeout; got <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want a positive value", got)
+	}
+}

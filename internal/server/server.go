@@ -24,6 +24,22 @@ func NewServer(addr string, port uint16, clients []*pihole.Client) *Server {
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", addr, port),
 		Handler: mux,
+		// Close idle keep-alive connections below the 15s Prometheus scrape
+		// interval so a connection is never left idle long enough for the
+		// intermediary NAT path (docker-proxy publishing the port) to go stale
+		// on it. A stale keep-alive hangs the next inbound scrape until the
+		// scrape timeout and shows up as up==0 until the container is
+		// restarted; expiring the connection between scrapes makes Prometheus
+		// redial fresh each time. This is the server-side mirror of the
+		// client-side DisableKeepAlives on the upstream Pi-hole calls.
+		IdleTimeout: 10 * time.Second,
+		// Bound the time spent reading request headers (slowloris hardening).
+		ReadHeaderTimeout: 5 * time.Second,
+		// WriteTimeout is intentionally unset: the /metrics response time is
+		// already bounded by the per-call API-client timeout applied to each
+		// upstream Pi-hole request, so the handler cannot hang indefinitely
+		// writing a response, and a fixed write deadline would risk cutting off
+		// a slow-but-successful collection.
 	}
 
 	s := &Server{
