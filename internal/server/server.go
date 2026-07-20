@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -9,8 +10,14 @@ import (
 	"github.com/eko/pihole-exporter/internal/pihole"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 )
+
+// metricsIdleTimeout bounds how long an idle keep-alive connection to /metrics
+// is kept open. It MUST stay below the 15s Prometheus scrape interval so an
+// idle connection is always closed between scrapes: left open, a connection
+// over the port-publishing NAT path goes stale and the next inbound scrape
+// hangs until its timeout (up==0) until the container is restarted.
+const metricsIdleTimeout = 10 * time.Second
 
 // Server is the struct for the HTTP server.
 type Server struct {
@@ -32,7 +39,7 @@ func NewServer(addr string, port uint16, clients []*pihole.Client) *Server {
 		// restarted; expiring the connection between scrapes makes Prometheus
 		// redial fresh each time. This is the server-side mirror of the
 		// client-side DisableKeepAlives on the upstream Pi-hole calls.
-		IdleTimeout: 10 * time.Second,
+		IdleTimeout: metricsIdleTimeout,
 		// Bound the time spent reading request headers (slowloris hardening).
 		ReadHeaderTimeout: 5 * time.Second,
 		// WriteTimeout is intentionally unset: the /metrics response time is
@@ -58,7 +65,7 @@ func NewServer(addr string, port uint16, clients []*pihole.Client) *Server {
 			wg.Add(1)
 			go func(c *pihole.Client) {
 				defer wg.Done()
-				c.CollectMetricsAsync(writer, request)
+				c.CollectMetricsAsync()
 			}(client)
 		}
 

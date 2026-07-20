@@ -68,6 +68,10 @@ func newTestClient(t *testing.T, baseURL string) *pihole.Client {
 // still yields a complete /metrics response. The test fails (rather than hangs)
 // if the handler does not return within a generous budget.
 func TestMetricsHandler_SlowCollectionStillServes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: reproduces the >10s collection stall")
+	}
+
 	metricsInit.Do(metrics.Init)
 
 	const slowDelay = 11 * time.Second // exceeds the old 10s handler cap
@@ -129,7 +133,13 @@ func TestMetricsHandler_SlowCollectionStillServes(t *testing.T) {
 func TestNewServer_ClosesIdleConnections(t *testing.T) {
 	srv := NewServer("127.0.0.1", 0, nil)
 
+	// The IdleTimeout invariant: it must stay below the Prometheus scrape
+	// interval so idle keep-alive connections close between scrapes. Assert the
+	// named const directly against the interval so drift fails here.
 	const scrapeInterval = 15 * time.Second
+	if metricsIdleTimeout >= scrapeInterval {
+		t.Errorf("metricsIdleTimeout = %v, must stay below the %v scrape interval", metricsIdleTimeout, scrapeInterval)
+	}
 	if got := srv.httpServer.IdleTimeout; got <= 0 || got >= scrapeInterval {
 		t.Errorf("IdleTimeout = %v, want a positive value below the %v scrape interval", got, scrapeInterval)
 	}

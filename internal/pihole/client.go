@@ -2,7 +2,6 @@ package pihole
 
 import (
 	"fmt"
-	"net/http"
 
 	log "github.com/sirupsen/logrus"
 
@@ -27,11 +26,10 @@ const (
 	MetricsCollectionInProgress ClientStatus = iota
 	MetricsCollectionSuccess
 	MetricsCollectionError
-	MetricsCollectionTimeout
 )
 
 func (status ClientStatus) String() string {
-	return []string{"MetricsCollectionInProgress", "MetricsCollectionSuccess", "MetricsCollectionError", "MetricsCollectionTimeout"}[status]
+	return []string{"MetricsCollectionInProgress", "MetricsCollectionSuccess", "MetricsCollectionError"}[status]
 }
 
 type ClientChannel struct {
@@ -74,18 +72,34 @@ func (c *Client) String() string {
 	return c.config.PIHoleHostname
 }
 
-func (c *Client) CollectMetricsAsync(writer http.ResponseWriter, request *http.Request) {
+func (c *Client) CollectMetricsAsync() {
+	// The /metrics handler consumes exactly one value from c.Status per client.
+	// getStatistics/setMetrics could panic (e.g. a nil dereference on an
+	// unexpected API shape); without this recover the goroutine would crash the
+	// process before sending, leaving the handler's single receive blocked
+	// forever. Recover, send exactly one error status, and surface the panic as
+	// up==0 instead. sent guards against a double-send if the panic happens
+	// after a normal send below.
+	sent := false
+	defer func() {
+		if r := recover(); r != nil && !sent {
+			c.Status <- &ClientChannel{Status: MetricsCollectionError, Err: fmt.Errorf("panic collecting metrics: %v", r)}
+		}
+	}()
+
 	log.Debugf("Collecting from %s", c.config.PIHoleHostname)
 	if stats, blockedDomains, permittedDomains, clients, upstreams, piHoleStatus, err := c.getStatistics(); err == nil {
 		c.setMetrics(stats, blockedDomains, permittedDomains, clients, upstreams, piHoleStatus)
 		c.Status <- &ClientChannel{Status: MetricsCollectionSuccess, Err: nil}
+		sent = true
 		log.Debugf("New tick of statistics from %s: %s", c.config.PIHoleHostname, stats)
 	} else {
 		c.Status <- &ClientChannel{Status: MetricsCollectionError, Err: err}
+		sent = true
 	}
 }
 
-func (c *Client) CollectMetrics(writer http.ResponseWriter, request *http.Request) error {
+func (c *Client) CollectMetrics() error {
 	stats, blockedDomains, permittedDomains, clients, upstreams, piHoleStatus, err := c.getStatistics()
 	if err != nil {
 		return err
